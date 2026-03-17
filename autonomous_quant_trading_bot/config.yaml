@@ -1,0 +1,64 @@
+broker:
+  timezone_offset_utc: 0
+  pip_size: 0.0001
+  default_symbol: "EURUSD"
+  default_timeframe: "H1"
+
+sessions:
+  asia:
+    start: "00:00"
+    end: "08:00"
+  london:
+    start: "08:00"
+    end: "16:00"
+  new_york:
+    start: "13:00"
+    end: "21:00"
+  sydney:
+    start: "21:00"
+    end: "05:00"
+
+levels:
+  pip_tolerance: 10
+  day_reset_hour: 21           # NY close = 21:00 UTC
+  week_reset_day: 0            # 0=Monday
+  swing_lookback: 20
+  fractal_period: 5
+
+candle_patterns:
+  pinbar:
+    wick_body_ratio: 2.0
+  doji:
+    body_range_ratio: 0.1
+  engulfing:
+    min_body_ratio: 0.6
+  rejection:
+    wick_pct_of_range: 0.66
+  impulse:
+    body_pct_of_range: 0.75
+  inside_bar:
+    enabled: true
+
+risk:
+  max_risk_per_trade_pct: 1.0
+  max_daily_drawdown_pct: 3.0
+  max_total_drawdown_pct: 10.0
+  max_correlated_positions: 3
+  news_blackout_minutes: 30
+
+execution:
+  slippage_pips: 2
+  max_spread_pips: 5
+  twap_slices: 5
+
+optimization:
+  regime_refit_hours: 4
+  monte_carlo_paths: 10000
+  walk_forward_window: 500
+  min_trades_for_refit: 30
+
+autoresearch:
+  enabled: true
+  calmar_target: 2.0
+  max_mutations_per_cycle: 5
+  backtest_years: 3

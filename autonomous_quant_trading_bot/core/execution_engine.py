@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, List, Optional
-from datetime import datetime
+from typing import Dict, List, Optional, TYPE_CHECKING
+from datetime import datetime, timezone
 
-from .signal_planner import TradePlan
 from ..math_engine.stochastic_calculus import GirsanovTransform, MicrostructureSDE
+
+if TYPE_CHECKING:
+    from .signal_planner import TradePlan
 
 
 @dataclass
@@ -122,7 +124,7 @@ class ExecutionEngine:
             slippage=round(slippage, 6),
             execution_cost=abs(slippage) + (current_ask - current_bid) / 2,
             order_type="market",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         self._execution_log.append(result)
         return result

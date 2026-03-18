@@ -17,6 +17,7 @@ from ..math_engine.time_series import ARIMA, GARCH
 from ..math_engine.stochastic_processes import MonteCarloEngine, GeometricBrownianMotion, OrnsteinUhlenbeck
 from ..math_engine.stochastic_calculus import ItoLemma, GirsanovTransform
 from ..math_engine.finance_models import BlackScholes, ExpectancyCalculator
+from ..rl.drl_optimizer import get_optimal_actions
 
 
 @dataclass
@@ -54,6 +55,36 @@ class SignalPlanner:
         self.garch = GARCH()
         self.mc = MonteCarloEngine(n_paths=self.mc_paths)
         self.expectancy = ExpectancyCalculator()
+
+    def _build_drl_state(
+        self,
+        closes: NDArray[np.float64],
+        returns: NDArray[np.float64],
+        regime: RegimeState,
+        mc_stats: Dict[str, float],
+    ) -> NDArray[np.float64]:
+        pca_stub = np.zeros(10, dtype=np.float64)
+        garch_vol = self.garch.current_vol(returns)
+        arima_f = self.arima.forecast(closes, steps=1)[-1]
+        dd_proxy = max(0.0, 1.0 - regime.confidence)
+        state = np.concatenate(
+            [
+                np.asarray(regime.probabilities, dtype=np.float64),
+                pca_stub,
+                np.array([garch_vol, float(arima_f)], dtype=np.float64),
+                np.array(
+                    [
+                        mc_stats["mean_final"],
+                        mc_stats["std_final"],
+                        mc_stats["expected_min"],
+                        mc_stats["expected_max"],
+                    ],
+                    dtype=np.float64,
+                ),
+                np.array([0.0, 0.0, dd_proxy, 0.0002], dtype=np.float64),
+            ]
+        )
+        return state
 
     def plan(
         self,
@@ -126,6 +157,27 @@ class SignalPlanner:
         position_size = risk_amount / (pip_risk * self.pip_size * 100000) if pip_risk > 0 else 0.01
         position_size = round(max(0.01, min(position_size, 10.0)), 2)
 
+        multipliers = {k: 1.0 for k in (
+            "position_size_multiplier",
+            "stop_distance_multiplier",
+            "tp_rr_ratio",
+            "pattern_threshold_scaler",
+            "garch_order_adjustment",
+            "mc_path_count_scaler",
+            "risk_multiplier",
+        )}
+        if self.config.get("drl", {}).get("drl_enabled", False):
+            drl_state = self._build_drl_state(closes, returns, regime, mc_stats)
+            multipliers = get_optimal_actions(drl_state, config=self.config)
+
+            stop_distance = abs(current_price - sl_target) * multipliers["stop_distance_multiplier"]
+            reward_distance = stop_distance * max(1.0, multipliers["tp_rr_ratio"])
+            sl_target = current_price - direction * stop_distance
+            tp_target = current_price + direction * reward_distance
+            position_size *= multipliers["position_size_multiplier"] * multipliers["risk_multiplier"]
+            vol *= multipliers["garch_order_adjustment"]
+            position_size = round(max(0.01, min(position_size, 10.0)), 2)
+
         # Combined confidence
         arima_agreement = 1.0 if arima_direction == direction else 0.7
         regime_factor = 1.0
@@ -142,6 +194,7 @@ class SignalPlanner:
             + regime_factor * 0.10,
             0.0, 1.0,
         )
+        final_confidence = np.clip(final_confidence * multipliers["pattern_threshold_scaler"], 0.0, 1.0)
 
         return TradePlan(
             direction=direction,
@@ -162,5 +215,12 @@ class SignalPlanner:
                 "bs_expectancy": bs_expectancy,
                 "log_drift": log_drift,
                 "rr_ratio": reward / risk if risk > 0 else 0,
+                "drl_position_size_multiplier": float(multipliers["position_size_multiplier"]),
+                "drl_stop_distance_multiplier": float(multipliers["stop_distance_multiplier"]),
+                "drl_tp_rr_ratio": float(multipliers["tp_rr_ratio"]),
+                "drl_pattern_threshold_scaler": float(multipliers["pattern_threshold_scaler"]),
+                "drl_garch_order_adjustment": float(multipliers["garch_order_adjustment"]),
+                "drl_mc_path_count_scaler": float(multipliers["mc_path_count_scaler"]),
+                "drl_risk_multiplier": float(multipliers["risk_multiplier"]),
             },
         )

@@ -25,6 +25,8 @@ from core.position_manager import PositionManager
 from core.journal import Journal
 from backtester.engine import Backtester
 from evolution.autoresearch import Autoresearch
+from rl.drl_optimizer import DRLOptimizer
+from orchestrator.trading_orchestrator import build_orchestrator_agent
 from utils.helpers import load_config, setup_logging, ConsoleDisplay, Timer
 
 logger = logging.getLogger("trading_bot")
@@ -52,7 +54,12 @@ class AutonomousBot:
         self.symbol: str = self.config.get("broker", {}).get("default_symbol", "EURUSD")
         self.balance: float = 10000.0
         self._last_regime_fit: float = 0.0
+        self._last_drl_train: float = 0.0
+        self._last_regime_name: str | None = None
         self._running: bool = False
+        self.drl_optimizer = DRLOptimizer(self.config)
+        orch_enabled = self.config.get("orchestrator", {}).get("enabled", False)
+        self.orchestrator = build_orchestrator_agent(self, self.config) if orch_enabled else None
 
     def initialize(self, initial_balance: float = 10000.0) -> None:
         """Load history and calibrate all models."""
@@ -68,6 +75,9 @@ class AutonomousBot:
                 logger.info("Regime detector calibrated on historical data")
         except Exception as e:
             logger.warning(f"Could not fetch initial data: {e}")
+
+        if self.config.get("drl", {}).get("drl_enabled", False):
+            logger.info("DRL optimizer initialized (enabled=%s)", self.drl_optimizer.enabled)
 
     def _phase_analyze(self, ohlcv: pd.DataFrame, current_time: datetime):
         """Phase 1: Analyze — detect session, levels, candles, generate base signal."""
@@ -178,6 +188,10 @@ class AutonomousBot:
 
     def tick(self, ohlcv: pd.DataFrame, current_time: datetime) -> None:
         """Run one complete 6-phase cycle."""
+        if self.orchestrator is not None:
+            self.orchestrator.run_cycle(ohlcv, current_time)
+            return
+
         # Re-fit regime detector periodically
         hours_since = (time.time() - self._last_regime_fit) / 3600
         if self.regime_detector.needs_refit(hours_since):
@@ -187,6 +201,25 @@ class AutonomousBot:
 
         # Phase 1: Analyze
         signal, regime = self._phase_analyze(ohlcv, current_time)
+        regime_changed = self._last_regime_name is not None and self._last_regime_name != regime.regime.name
+        self._last_regime_name = regime.regime.name
+
+        # DRL online refresh every 4h or on regime flip.
+        if self.config.get("drl", {}).get("drl_enabled", False):
+            hours_since_drl = (time.time() - self._last_drl_train) / 3600
+            if regime_changed or hours_since_drl >= 4.0:
+                try:
+                    report = self.drl_optimizer.continue_online_learning(num_timesteps=5_000)
+                    logger.info(
+                        "DRL online update: accepted=%s, calmar=%.3f, oos=%.2f%% (%s)",
+                        report.accepted,
+                        report.metrics.get("calmar", 0.0),
+                        report.out_of_sample_improvement * 100.0,
+                        report.reason,
+                    )
+                except Exception as e:
+                    logger.warning(f"DRL online update failed: {e}")
+                self._last_drl_train = time.time()
 
         # Phase 5: Position management (runs always)
         recent = list(ohlcv["close"].values[-20:])

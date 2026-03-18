@@ -62,3 +62,16 @@ autoresearch:
   calmar_target: 2.0
   max_mutations_per_cycle: 5
   backtest_years: 3
+
+drl:
+  drl_enabled: true
+  drl_model_path: "results/models/drl_us30_model"
+  drl_algo: "PPO"
+  num_envs: 4
+  eval_freq: 10000
+  us30_data_glob: "Blue Capital data/US30_data/*.csv"
+
+orchestrator:
+  enabled: true
+  gemini_model: "gemini-2.5-pro-exp"
+  gemini_api_key: ""

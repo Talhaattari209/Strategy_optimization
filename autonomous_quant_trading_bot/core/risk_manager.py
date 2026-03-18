@@ -15,6 +15,7 @@ from .signal_planner import TradePlan
 from .regime_detector import RegimeState
 from ..math_engine.stochastic_processes import MonteCarloEngine
 from ..math_engine.linear_algebra import CovarianceMatrix
+from ..rl.drl_optimizer import get_optimal_actions
 
 
 @dataclass
@@ -139,6 +140,19 @@ class RiskManager:
         adjusted_size = plan.position_size
         if regime and regime.regime.name == "HIGH_VOL":
             adjusted_size *= 0.5
+
+        if self.config.get("drl", {}).get("drl_enabled", False) and regime is not None:
+            drl_state = np.concatenate(
+                [
+                    np.asarray(regime.probabilities, dtype=np.float64),
+                    np.zeros(10, dtype=np.float64),
+                    np.array([regime.volatility, 0.0], dtype=np.float64),
+                    np.zeros(4, dtype=np.float64),
+                    np.array([0.0, 0.0, total_dd, 0.0002], dtype=np.float64),
+                ]
+            )
+            drl_actions = get_optimal_actions(drl_state, config=self.config)
+            adjusted_size *= drl_actions["risk_multiplier"]
 
         # Drawdown scaling: reduce size as drawdown increases
         dd_factor = max(0.25, 1.0 - total_dd / self.max_total_dd)

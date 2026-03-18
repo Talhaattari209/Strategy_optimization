@@ -116,11 +116,13 @@ class DRLOptimizer:
             json.dump(payload, f, indent=2)
 
     def _build_sb3_model(self, vec_env):
+        import torch as _torch
+        device = "cuda" if _torch.cuda.is_available() else "cpu"
         if self.algo == "SAC":
-            return SAC("MlpPolicy", vec_env, verbose=0)
+            return SAC("MlpPolicy", vec_env, verbose=0, device=device)
         if self.algo == "TD3":
-            return TD3("MlpPolicy", vec_env, verbose=0)
-        return PPO("MlpPolicy", vec_env, verbose=0)
+            return TD3("MlpPolicy", vec_env, verbose=0, device=device)
+        return PPO("MlpPolicy", vec_env, verbose=0, device=device)
 
     def _train_fallback(self, num_trials: int = 60) -> TrainingReport:
         train_env = self._make_env(seed=123, timeframe="M5")

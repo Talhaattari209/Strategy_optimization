@@ -38,14 +38,44 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 def _load_orchestrator_skill() -> str:
+    """
+    Compose the orchestrator's instruction set from two skill sources:
+      1. Orchestrator skill.md  — project-level flow-control rules
+      2. algorithmic-trading AgentSkill references — domain knowledge
+         (patterns, sharp_edges, validations)
+
+    Grounding the orchestrator in both ensures flow-control decisions respect
+    algorithmic-trading best practices (walk-forward, cost models, look-ahead
+    bias prevention, position limits).
+    """
     root = Path(__file__).resolve().parents[2]
-    skill_path = root / "Orchestrator skill.md"
-    if skill_path.exists():
-        return skill_path.read_text(encoding="utf-8", errors="ignore")
-    return (
-        "You are US30_Quant_Orchestrator. Manage Analyze->Plan->Risk->Execute->Position->Journal, "
-        "trigger RL and autoresearch adaptively, and keep strict risk guardrails."
-    )
+    orch_path = root / "Orchestrator skill.md"
+    if orch_path.exists():
+        orch_text = orch_path.read_text(encoding="utf-8", errors="ignore")
+    else:
+        orch_text = (
+            "You are US30_Quant_Orchestrator. Manage Analyze->Plan->Risk->Execute->Position->Journal, "
+            "trigger RL and autoresearch adaptively, and keep strict risk guardrails."
+        )
+
+    # Load the algorithmic-trading AgentSkill reference files
+    skill_root = Path(__file__).resolve().parents[1] / "algorithmic-trading_AgentSkill"
+    algo_sections: list[str] = []
+    for fname in (
+        "SKILL.md",
+        "references/patterns.md",
+        "references/sharp_edges.md",
+        "references/validations.md",
+    ):
+        p = skill_root / fname
+        if p.exists():
+            algo_sections.append(p.read_text(encoding="utf-8", errors="ignore"))
+
+    if algo_sections:
+        algo_block = "\n\n---\n\n## Algorithmic Trading Skill\n\n" + "\n\n---\n\n".join(algo_sections)
+        return orch_text + algo_block
+
+    return orch_text
 
 
 def _safe_float(v: Any) -> float:

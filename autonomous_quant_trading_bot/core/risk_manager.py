@@ -2,6 +2,12 @@
 Risk Manager — dynamic sizing, portfolio VaR, news blackout, drawdown guard.
 Volatility-scaled via Monte Carlo + covariance matrix.
 Runs BEFORE and AFTER execution in the 6-phase loop.
+
+Skill refs:
+  patterns/anti-pattern no-position-limits : enforce max position + drawdown limits
+  sharp_edges/capacity-ignored             : cap size to what the market can absorb
+  validations/no-max-drawdown-check        : max_total_dd gate in assess_trade()
+  validations/no-position-sizing           : volatility-adjusted sizing, not fixed lots
 """
 from __future__ import annotations
 
@@ -51,6 +57,8 @@ class RiskManager:
         self.max_total_dd: float = risk_cfg.get("max_total_drawdown_pct", 10.0) / 100.0
         self.max_correlated: int = risk_cfg.get("max_correlated_positions", 3)
         self.news_blackout_min: int = risk_cfg.get("news_blackout_minutes", 30)
+        # Capacity guard (sharp_edges: capacity-ignored)
+        self.max_adv_participation: float = risk_cfg.get("max_adv_participation", 0.10)
 
         self.mc = MonteCarloEngine(n_paths=5000)
 
@@ -91,6 +99,24 @@ class RiskManager:
             return 0.0
         return (self._daily_start_balance - current_balance) / self._daily_start_balance
 
+    @staticmethod
+    def calculate_capacity(
+        target_size: float,
+        average_daily_volume: float,
+        max_participation: float = 0.10,
+    ) -> float:
+        """
+        Cap a position to what the market can absorb without outsized impact.
+
+        Skill ref (sharp_edges/capacity-ignored): a strategy that is profitable
+        at small size can fail at scale once its own order flow moves the market.
+        Default: do not exceed 10 % of average daily volume.
+        """
+        if average_daily_volume <= 0:
+            return target_size
+        max_size = average_daily_volume * max_participation
+        return min(target_size, max_size)
+
     def _portfolio_var(self, returns_matrix: NDArray[np.float64] | None = None) -> float:
         if returns_matrix is None or returns_matrix.shape[1] < 2:
             return 0.0
@@ -115,6 +141,7 @@ class RiskManager:
         current_time: datetime,
         regime: RegimeState | None = None,
         returns_matrix: NDArray[np.float64] | None = None,
+        average_daily_volume: float = 0.0,
     ) -> RiskAssessment:
         self.update_balance(current_balance, current_time)
 
@@ -157,6 +184,12 @@ class RiskManager:
         # Drawdown scaling: reduce size as drawdown increases
         dd_factor = max(0.25, 1.0 - total_dd / self.max_total_dd)
         adjusted_size *= dd_factor
+
+        # Capacity guard: respect average-daily-volume limit (sharp_edges: capacity-ignored)
+        if average_daily_volume > 0:
+            adjusted_size = self.calculate_capacity(
+                adjusted_size, average_daily_volume, self.max_adv_participation
+            )
 
         # Portfolio VaR
         pvar = self._portfolio_var(returns_matrix)

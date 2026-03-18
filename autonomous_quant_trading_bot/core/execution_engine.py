@@ -1,6 +1,8 @@
 """
 Execution Engine — smart order execution with microstructure modeling.
 Uses Girsanov for optimal entry, TWAP/VWAP slicing, microstructure SDE cost simulation.
+
+Skill ref (sharp_edges/transaction-cost-underestimate): always model realistic costs.
 """
 from __future__ import annotations
 
@@ -13,6 +15,32 @@ from ..math_engine.stochastic_calculus import GirsanovTransform, MicrostructureS
 
 if TYPE_CHECKING:
     from .signal_planner import TradePlan
+
+
+@dataclass
+class RealisticCosts:
+    """
+    Composite transaction-cost model (sharp_edges: transaction-cost-underestimate).
+    Bundles commission, half-spread, and market-impact slippage into a single
+    callable so every backtest path applies identical cost assumptions.
+    """
+    commission_per_share: float = 0.005
+    spread_bps: float = 10.0       # half-spread in basis points
+    slippage_bps: float = 10.0     # market-impact estimate in basis points
+    min_commission: float = 1.0
+
+    def calculate(self, shares: float, price: float) -> float:
+        commission = max(shares * self.commission_per_share, self.min_commission)
+        spread = shares * price * (self.spread_bps / 10_000)
+        slippage = shares * price * (self.slippage_bps / 10_000)
+        return commission + spread + slippage
+
+    def total_bps(self, shares: float, price: float) -> float:
+        """Return round-trip cost expressed in basis points of notional."""
+        notional = shares * price
+        if notional <= 0:
+            return 0.0
+        return self.calculate(shares, price) / notional * 10_000
 
 
 @dataclass
@@ -47,6 +75,14 @@ class ExecutionEngine:
         self.max_spread: float = exec_cfg.get("max_spread_pips", 5)
         self.n_slices: int = exec_cfg.get("twap_slices", 5)
         self.pip_size: float = self.config.get("broker", {}).get("pip_size", 0.0001)
+
+        cost_cfg = exec_cfg.get("realistic_costs", {})
+        self.realistic_costs = RealisticCosts(
+            commission_per_share=cost_cfg.get("commission_per_share", 0.005),
+            spread_bps=cost_cfg.get("spread_bps", 10.0),
+            slippage_bps=cost_cfg.get("slippage_bps", 10.0),
+            min_commission=cost_cfg.get("min_commission", 1.0),
+        )
 
         self.microstructure = MicrostructureSDE()
         self._execution_log: List[ExecutionResult] = []
@@ -117,12 +153,13 @@ class ExecutionEngine:
         if broker_interface is not None:
             pass  # broker_interface.send_order(...)
 
+        modeled_cost = self.realistic_costs.calculate(plan.position_size, actual_fill)
         result = ExecutionResult(
             filled=True,
             fill_price=round(actual_fill, 5),
             fill_size=plan.position_size,
             slippage=round(slippage, 6),
-            execution_cost=abs(slippage) + (current_ask - current_bid) / 2,
+            execution_cost=round(modeled_cost, 6),
             order_type="market",
             timestamp=datetime.now(timezone.utc),
         )

@@ -2,12 +2,21 @@
 Phase 4 – Stochastic Processes
 Monte Carlo + GBM + OU → Simulate paths from current level (HOD/LOD etc.)
 until next session close.
+GPU-accelerated via PyTorch when CUDA is available.
 """
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
 from typing import Dict
+
+try:
+    import torch as _torch
+    _TORCH_AVAILABLE = True
+    _DEVICE = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+except ImportError:
+    _TORCH_AVAILABLE = False
+    _DEVICE = None
 
 
 class BrownianMotion:
@@ -117,6 +126,7 @@ class MonteCarloEngine:
     """
     Monte Carlo path generator.
     Runs 10,000 paths for robust probability estimation.
+    Uses GPU (CUDA) via PyTorch when available, falls back to NumPy on CPU.
     """
 
     def __init__(self, n_paths: int = 10000, seed: int | None = None) -> None:
@@ -126,14 +136,52 @@ class MonteCarloEngine:
     def simulate_gbm(
         self, S0: float, mu: float, sigma: float, T: float, n_steps: int = 100
     ) -> NDArray[np.float64]:
+        if _TORCH_AVAILABLE:
+            return self._simulate_gbm_gpu(S0, mu, sigma, T, n_steps)
         gbm = GeometricBrownianMotion(mu, sigma)
         return gbm.simulate(S0, T, n_steps, self.n_paths, self.seed)
+
+    def _simulate_gbm_gpu(
+        self, S0: float, mu: float, sigma: float, T: float, n_steps: int
+    ) -> NDArray[np.float64]:
+        dt = T / n_steps
+        if self.seed is not None:
+            _torch.manual_seed(self.seed)
+        Z = _torch.randn(self.n_paths, n_steps, device=_DEVICE)
+        log_ret = (_torch.tensor((mu - 0.5 * sigma ** 2) * dt, device=_DEVICE)
+                   + _torch.tensor(sigma * float(np.sqrt(dt)), device=_DEVICE) * Z)
+        log_paths = _torch.cat([
+            _torch.zeros(self.n_paths, 1, device=_DEVICE),
+            _torch.cumsum(log_ret, dim=1)
+        ], dim=1)
+        paths = S0 * _torch.exp(log_paths)
+        return paths.cpu().numpy().astype(np.float64)
 
     def simulate_ou(
         self, X0: float, theta: float, mu: float, sigma: float, T: float, n_steps: int = 100
     ) -> NDArray[np.float64]:
+        if _TORCH_AVAILABLE:
+            return self._simulate_ou_gpu(X0, theta, mu, sigma, T, n_steps)
         ou = OrnsteinUhlenbeck(theta, mu, sigma)
         return ou.simulate(X0, T, n_steps, self.n_paths, self.seed)
+
+    def _simulate_ou_gpu(
+        self, X0: float, theta: float, mu: float, sigma: float, T: float, n_steps: int
+    ) -> NDArray[np.float64]:
+        dt = T / n_steps
+        if self.seed is not None:
+            _torch.manual_seed(self.seed)
+        Z = _torch.randn(self.n_paths, n_steps, device=_DEVICE)
+        paths = _torch.zeros(self.n_paths, n_steps + 1, device=_DEVICE)
+        paths[:, 0] = X0
+        _theta = _torch.tensor(theta * dt, device=_DEVICE)
+        _mu    = _torch.tensor(mu, device=_DEVICE)
+        _sig   = _torch.tensor(sigma * float(np.sqrt(dt)), device=_DEVICE)
+        for t in range(n_steps):
+            paths[:, t + 1] = (paths[:, t]
+                               + _theta * (_mu - paths[:, t])
+                               + _sig * Z[:, t])
+        return paths.cpu().numpy().astype(np.float64)
 
     def probability_above(self, paths: NDArray[np.float64], level: float) -> float:
         return float(np.mean(paths[:, -1] > level))

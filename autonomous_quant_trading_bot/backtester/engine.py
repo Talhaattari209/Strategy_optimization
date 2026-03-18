@@ -1,6 +1,11 @@
 """
 Backtester Engine — walk-forward + Monte Carlo robustness testing.
 Runs the full 6-phase loop on historical data.
+
+Skill refs:
+  patterns/golden-rules   : event-driven backtest; never optimize on full data
+  sharp_edges/look-ahead  : signals generated on bar i, execution deferred to bar i+1 open
+  validations/no-walk-forward: walk_forward() uses sklearn TimeSeriesSplit
 """
 from __future__ import annotations
 
@@ -10,6 +15,12 @@ from typing import Dict, List, Optional
 from datetime import datetime
 from pathlib import Path
 import logging
+
+try:
+    from sklearn.model_selection import TimeSeriesSplit
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
 
 from ..core.pattern_recognizer import PatternRecognizer, BaseSignal
 from ..core.regime_detector import RegimeDetector
@@ -66,22 +77,29 @@ class Backtester:
 
         pip_size = self.config.get("broker", {}).get("pip_size", 0.0001)
         closes = data["close"].values.astype(np.float64)
+        # Use next-bar open for execution to eliminate look-ahead bias
+        # (sharp_edges: look-ahead-bias — signals on bar i, fill on bar i+1)
+        opens = data["open"].values.astype(np.float64) if "open" in data.columns else closes
 
         if len(closes) > 50:
             returns = np.diff(np.log(closes[:200]))
             regime_detector.fit(returns)
 
-        for i in range(self.lookback, len(data)):
+        # Iterate to len(data)-1 so bar i+1 always exists for execution
+        for i in range(self.lookback, len(data) - 1):
             window = data.iloc[max(0, i - self.lookback):i + 1]
+            # Signal price: close of bar i (information available end-of-bar)
             current_price = float(closes[i])
+            # Execution price: open of bar i+1 (earliest tradeable price after signal)
+            exec_price = float(opens[i + 1])
             current_time = window.index[-1]
             if not isinstance(current_time, datetime):
                 current_time = pd.Timestamp(current_time).to_pydatetime()
 
-            # Phase 1: ANALYZE — generate base signal
+            # Phase 1: ANALYZE — generate base signal on completed bar i
             signal = recognizer.generate_signal(window, current_time)
 
-            # Check open positions first
+            # Check open positions first (mark-to-market at current close)
             for sym, pos in list(pos_mgr.open_positions.items()):
                 pos_mgr.update_price(sym, current_price)
                 recent = list(closes[max(0, i - 20):i + 1])
@@ -111,7 +129,7 @@ class Backtester:
             recent_returns = np.diff(np.log(closes[max(0, i - 100):i + 1]))
             regime = regime_detector.detect(recent_returns)
 
-            # Phase 2: PLAN
+            # Phase 2: PLAN (planned against bar-i close; entry will be bar-i+1 open)
             plan = planner.plan(signal, window, regime, balance)
             if plan is None:
                 result.equity_curve.append(balance)
@@ -125,10 +143,10 @@ class Backtester:
 
             plan.position_size = risk_assessment.adjusted_size
 
-            # Phase 4: EXECUTE (simulated)
+            # Phase 4: EXECUTE — fill at bar i+1 open (no look-ahead bias)
             spread = 2 * pip_size
-            bid = current_price - spread / 2
-            ask = current_price + spread / 2
+            bid = exec_price - spread / 2
+            ask = exec_price + spread / 2
             exec_result = exec_engine.execute_market(plan, bid, ask)
 
             if exec_result.filled:
@@ -163,24 +181,42 @@ class Backtester:
         n_folds: int = 5,
         symbol: str = "EURUSD",
     ) -> List[BacktestResult]:
-        """Walk-forward validation: train on in-sample, test on out-of-sample."""
-        n = len(data)
-        fold_size = n // n_folds
-        results = []
+        """
+        Walk-forward validation using sklearn TimeSeriesSplit when available.
 
-        for fold in range(n_folds):
-            train_end = int((fold + 1) * fold_size * train_pct)
-            test_start = train_end
-            test_end = min((fold + 1) * fold_size, n)
+        Skill ref (validations/no-walk-forward): time-series cross-validation must
+        respect chronological order — never shuffle, never train on future data.
+        """
+        results: List[BacktestResult] = []
 
-            if test_end <= test_start + self.lookback:
+        if _SKLEARN_AVAILABLE:
+            tscv = TimeSeriesSplit(n_splits=n_folds)
+            splits = list(tscv.split(data))
+        else:
+            # Deterministic fallback matching TimeSeriesSplit expanding-window logic
+            n = len(data)
+            fold_size = n // (n_folds + 1)
+            splits = []
+            for k in range(n_folds):
+                train_end = fold_size * (k + 1)
+                test_start = train_end
+                test_end = min(train_end + fold_size, n)
+                if test_end > test_start:
+                    splits.append((list(range(train_end)), list(range(test_start, test_end))))
+
+        for fold, (train_idx, test_idx) in enumerate(splits):
+            if len(test_idx) <= self.lookback:
                 continue
 
-            test_data = data.iloc[test_start:test_end]
+            test_data = data.iloc[test_idx]
             result = self.run(test_data, symbol)
             results.append(result)
-            logger.info(f"Fold {fold + 1}/{n_folds}: {result.summary.get('total_trades', 0)} trades, "
-                        f"PnL={result.summary.get('total_pnl', 0):.2f}")
+            logger.info(
+                "Fold %d/%d: %d trades, PnL=%.2f",
+                fold + 1, n_folds,
+                result.summary.get("total_trades", 0),
+                result.summary.get("total_pnl", 0),
+            )
 
         return results
 
